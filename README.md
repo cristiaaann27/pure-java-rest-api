@@ -1,382 +1,297 @@
-## REST API in pure Java without any frameworks
+# REST API in pure Java 25
 
-This is a demo application developed in Java 11 using 
-[`jdk.httpserver`](https://docs.oracle.com/javase/10/docs/api/com/sun/net/httpserver/package-summary.html) module 
-and a few additional Java libraries (like [vavr](http://www.vavr.io/), [lombok](https://projectlombok.org/)).
+A working REST API with **zero dependencies and no build tool**. No Spring, no Jackson, no Lombok,
+no Vavr, no JUnit, no Maven, no Gradle. Everything the application needs is either in the JDK or
+written here by hand.
 
-## Genesis of this project
-I am a day-to-day Spring developer and I got used to this framework so much that I imagined how it would be to forget about it for a while
-and try to build completely pure Java application from scratch. 
-
-I thought it could be interesting from learning perspective and a bit refreshing.
-
-When I started building this I often came across situations when I missed some features which Spring provides out of the box.
-
-At that times, instead of switching on another Spring capability, I had to rethink it and develop it myself.
-
-It occurred that for real business case I would probably still prefer to use Spring instead of reinventing a wheel.
-
-Still, I believe the exercise was pretty interesting experience.
-
-## Beginning.
-I will go through this exercise step by step but not always pasting a complete code in text
-but you can always checkout each step from a separate branch.
-I started from empty `Application` main class. You can get an initial branch like that: 
+The point is not that you should build APIs this way. The point is that after writing the JSON
+parser, the router and the error mapping yourself, you know exactly what a framework is doing for
+you, and why.
 
 ```
-git checkout step-1
+requires jdk.httpserver;   // the entire dependency list, in src/main/java/module-info.java
 ```
 
-## First endpoint
+## Requirements
 
-The starting point of the web application is `com.sun.net.httpserver.HttpServer` class. 
-The most simple `/api/hello` endpoint could look as below: 
+JDK 25 or newer. Nothing else. Check with `javac -version`.
+
+## Quick start
+
+```bash
+./api build     # compile with javac into out/classes
+./api test      # compile and run the test suite
+./api run       # start the server on http://localhost:8000
+./api jar       # package a modular, executable jar
+./api hash      # print a password hash for the admin credentials
+./api clean     # delete out/
+```
+
+`api` is a shell script that calls `javac`, `jar` and `java`. That is the whole build system.
+
+There is not even a compilation step if you do not want one. Since Java 22 the launcher runs
+multi-file source programs directly:
+
+```bash
+java --source-path src/main/java src/main/java/com/cristiannustes/app/Application.java
+```
+
+### IDE
+
+`.project`, `.classpath` and `.settings/` are committed. They are plain XML read by the Java
+language server that Eclipse, VS Code and Cursor share, and they describe exactly what `./api`
+does: two source folders, Java 25, no libraries. Without them the IDE has to guess the layout of a
+project that has no build file, and a wrong guess shows phantom errors on code that compiles.
+
+## Trying it out
+
+```bash
+# Health
+curl localhost:8000/api/health
+
+# Create a user
+curl -X POST localhost:8000/api/users \
+  -H 'Content-Type: application/json' \
+  -d '{"login":"marcin","password":"a-good-password"}'
+
+# List, with pagination
+curl 'localhost:8000/api/users?page=0&size=10'
+
+# Read, replace, delete
+curl localhost:8000/api/users/{id}
+curl -X PUT localhost:8000/api/users/{id} \
+  -H 'Content-Type: application/json' \
+  -d '{"login":"marcin.nowak","password":"another-good-one"}'
+curl -X DELETE localhost:8000/api/users/{id}
+
+# The greeting endpoint, behind basic authentication
+curl -u admin:<password> 'localhost:8000/api/hello?name=Cristian'
+```
+
+On start up, if no admin password is configured, the server generates one and prints it to the log.
+To keep it stable, run `./api hash` and export the result as `API_ADMIN_PASSWORD_HASH`.
+
+### Endpoints
+
+| Method | Path                   | Description                        | Auth |
+|--------|------------------------|------------------------------------|------|
+| GET    | `/api/health`          | Liveness, uptime and user count    | no   |
+| POST   | `/api/users`           | Register a user, returns 201       | no   |
+| POST   | `/api/users/register`  | Alias kept from the original guide | no   |
+| GET    | `/api/users`           | Paginated list                     | no   |
+| GET    | `/api/users/{id}`      | Read one user                      | no   |
+| PUT    | `/api/users/{id}`      | Replace credentials                | no   |
+| DELETE | `/api/users/{id}`      | Delete, returns 204                | no   |
+| GET    | `/api/hello`           | Greeting                           | yes  |
+
+### Configuration
+
+Everything comes from the environment; nothing is hardcoded.
+
+| Variable                     | Default  | Meaning                              |
+|------------------------------|----------|--------------------------------------|
+| `API_PORT`                   | `8000`   | Listening port, `0` picks a free one |
+| `API_BACKLOG`                | `0`      | Pending connection queue             |
+| `API_ADMIN_USER`             | `admin`  | Basic auth user                      |
+| `API_ADMIN_PASSWORD_HASH`    | generated| Output of `./api hash`               |
+| `API_MAX_BODY_BYTES`         | `65536`  | Largest accepted request body        |
+| `API_SHUTDOWN_GRACE_SECONDS` | `5`      | Grace period on shutdown             |
+| `API_PASSWORD_ITERATIONS`    | `210000` | PBKDF2 cost factor                   |
+
+## Layout
+
+```
+src/main/java/
+  module-info.java            requires jdk.httpserver, and nothing else
+  com/cristiannustes/
+    json/                     JSON parser and writer          (replaces Jackson)
+    http/                     router, request, response       (replaces the web framework)
+      error/                  sealed error hierarchy, mapper
+      filter/                 request id, logging, body limit
+    domain/                   users, validation, business rules
+    data/                     in memory storage
+    api/                      HTTP handlers and JSON codecs
+    security/                 PBKDF2 hashing, basic auth
+    app/                      configuration, wiring, bootstrap
+src/test/java/
+  com/cristiannustes/
+    testing/                  the test framework              (replaces JUnit)
+```
+
+Request flow:
+
+```
+client -> HttpServer -> RequestLogFilter -> BodyLimitFilter -> Router -> handler -> service -> repository
+                              |                                  |
+                        binds RequestContext              ErrorMapper on failure
+```
+
+## What is written by hand, and what it taught
+
+### JSON, instead of Jackson
+
+`com.cristiannustes.json` is a sealed interface with six record implementations, a recursive descent
+parser and a writer. The sealed hierarchy is the interesting part:
 
 ```java
-import java.io.IOException;
-import java.io.OutputStream;
-import java.net.InetSocketAddress;
-
-import com.sun.net.httpserver.HttpServer;
-
-class Application {
-
-    public static void main(String[] args) throws IOException {
-        int serverPort = 8000;
-        HttpServer server = HttpServer.create(new InetSocketAddress(serverPort), 0);
-        server.createContext("/api/hello", (exchange -> {
-            String respText = "Hello!";
-            exchange.sendResponseHeaders(200, respText.getBytes().length);
-            OutputStream output = exchange.getResponseBody();
-            output.write(respText.getBytes());
-            output.flush();
-            exchange.close();
-        }));
-        server.setExecutor(null); // creates a default executor
-        server.start();
-    }
-}
-```
-When you run main program it will start web server at port `8000` and expose out first endpoint which is just printing `Hello!`, e.g. using curl:
-
-```bash
-curl localhost:8000/api/hello
-```
-
-Try it out yourself from branch:
-
-```bash
-git checkout step-2
-```
-
-## Support different HTTP methods
-Our first endpoint works like a charm but you will notice that no matter which HTTP method you'll use it will respond the same.
-E.g.: 
-
-```bash
-curl -X POST localhost:8000/api/hello
-curl -X PUT localhost:8000/api/hello
-```
-
-The first gotcha when building the API ourselves without a framework is that we need to add our own code to distinguish the methods, e.g.:
-
-```java
-        server.createContext("/api/hello", (exchange -> {
-
-            if ("GET".equals(exchange.getRequestMethod())) {
-                String respText = "Hello!";
-                exchange.sendResponseHeaders(200, respText.getBytes().length);
-                OutputStream output = exchange.getResponseBody();
-                output.write(respText.getBytes());
-                output.flush();
-            } else {
-                exchange.sendResponseHeaders(405, -1);// 405 Method Not Allowed
-            }
-            exchange.close();
-        }));
-```
-
-Now try again request: 
-```bash
-curl -v -X POST localhost:8000/api/hello
-```
-and the response would be like: 
-
-```bash
-> POST /api/hello HTTP/1.1
-> Host: localhost:8000
-> User-Agent: curl/7.61.0
-> Accept: */*
-> 
-< HTTP/1.1 405 Method Not Allowed
-```
-
-There are also a few things to remember, like to flush output or close exchange every time we return from the api.
-When I used Spring I even did not have to think about it.
-
-Try this part from branch:
-
-```bash
-git checkout step-3
-```
-
-## Parsing request params
-Parsing request params is another "feature" which we'll need to implement ourselves in contrary to utilising a framework.
-Let's say we would like our hello api to respond with a name passed as a param, e.g.: 
-
-```bash
-curl localhost:8000/api/hello?name=Marcin
-
-Hello Marcin!
-
-```
-We could parse params with a method like: 
-
-```java
-public static Map<String, List<String>> splitQuery(String query) {
-        if (query == null || "".equals(query)) {
-            return Collections.emptyMap();
-        }
-
-        return Pattern.compile("&").splitAsStream(query)
-            .map(s -> Arrays.copyOf(s.split("="), 2))
-            .collect(groupingBy(s -> decode(s[0]), mapping(s -> decode(s[1]), toList())));
-
-    }
-```
-
-and use it as below: 
-
-```java
- Map<String, List<String>> params = splitQuery(exchange.getRequestURI().getRawQuery());
-String noNameText = "Anonymous";
-String name = params.getOrDefault("name", List.of(noNameText)).stream().findFirst().orElse(noNameText);
-String respText = String.format("Hello %s!", name);
-           
-```
-
-You can find complete example in branch:
-
-```bash
-git checkout step-4
-```
-
-Similarly if we wanted to use path params, e.g.: 
-
-```bash
-curl localhost:8000/api/items/1
-```
-to get item by id=1, we would need to parse the path ourselves to extract an id from it. This is getting cumbersome.
-
-
-## Secure endpoint
-A common case in each REST API is to protect some endpoints with credentials, e.g. using basic authentication.
-For each server context we can set an authenticator as below: 
-
-```java
-HttpContext context =server.createContext("/api/hello", (exchange -> {
-  // this part remains unchanged
-}));
-context.setAuthenticator(new BasicAuthenticator("myrealm") {
-    @Override
-    public boolean checkCredentials(String user, String pwd) {
-        return user.equals("admin") && pwd.equals("admin");
-    }
-});
-```
-
-The "myrealm" in `BasicAuthenticator` is a realm name. Realm is a virtual name which can be used to separate different authentication spaces. 
-You can read more about it in [RFC 1945](https://tools.ietf.org/html/rfc1945#section-11)
-
-You can now invoke this protected endpoint by adding an `Authorization` header like that: 
-
-```bash
-curl -v localhost:8000/api/hello?name=Marcin -H 'Authorization: Basic YWRtaW46YWRtaW4='
-```
-
-The text after `Basic` is a Base64 encoded `admin:admin`  which are credentials hardcoded in our example code.
-In real application to authenticate user you would probably get it from the header and compare with username and password store in database.
-If you skip the header the API will respond with status
-```
-HTTP/1.1 401 Unauthorized
-
-```
-
-Check out the complete code from branch:
-
-```bash
-git checkout step-5
-```
-
-## JSON, exception handlers and others
-
-Now it's time for more complex example. 
-
-From my past experience in software development the most common API I was developing was exchanging JSON.
-
-We're going to develop an API to register new users. We will use an in-memory database to store them.
-
-Our user domain object will be simple: 
-
-```java
-@Value
-@Builder
-public class User {
-
-    String id;
-    String login;
-    String password;
-}
-
-```
-I'm using Lombok annotations to save me from constructor and getters boilerplate code, it will be generated in build time.
-
-In REST API I want to pass only login and password so I created a separate domain object: 
-
-```java
-@Value
-@Builder
-public class NewUser {
-
-    String login;
-    String password;
-}
-
-```
-
-Users will be created in a service which I will use in my API handler. The service method is simply storing the user. 
-In complete application it could do more, like send events after successful user registration.
-
-```java
-public String create(NewUser user) {
-    return userRepository.create(user);
+switch (value) {
+    case JsonNull ignored            -> out.append("null");
+    case JsonBoolean(boolean flag)   -> out.append(flag);
+    case JsonNumber(double number)   -> writeNumber(number, out);
+    case JsonString(String text)     -> writeString(text, out);
+    case JsonArray(List<JsonValue> items)          -> writeArray(items, out);
+    case JsonObject(Map<String, JsonValue> fields) -> writeObject(fields, out);
 }
 ```
 
-Our in-memory implementation of repository is as follows: 
-```java
+No `default` branch. The compiler knows every possible shape of a `JsonValue`, so if a seventh one
+is ever added, every switch that forgot about it stops compiling. That is a class of bug removed at
+the language level rather than caught by a test.
 
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+The parser is deliberately strict: no comments, no trailing commas, no duplicate keys, no trailing
+content, and a nesting limit of 64. That last one is not pedantry: `[[[[[...]]]]]` with a few
+thousand brackets is a StackOverflowError, which is a denial of service wearing a bug costume.
 
-import com.consulner.domain.user.NewUser;
-import com.consulner.domain.user.User;
-import com.consulner.domain.user.UserRepository;
+Mapping between records and JSON is explicit, in `UserJson`, rather than reflective. It is more
+code, but renaming a record component can no longer silently rename a field of the public API.
 
-public class InMemoryUserRepository implements UserRepository {
+### A router, instead of `@GetMapping`
 
-    private static final Map USERS_STORE = new ConcurrentHashMap();
+The original tutorial called path parameters "cumbersome" and left them out. `PathPattern` compiles
+`/api/users/{id}` once, at start up, into a regular expression with one capturing group per
+variable. `Router` then does what a framework does:
 
-    @Override
-    public String create(NewUser newUser) {
-        String id = UUID.randomUUID().toString();
-        User user = User.builder()
-            .id(id)
-            .login(newUser.getLogin())
-            .password(newUser.getPassword())
-            .build();
-        USERS_STORE.put(newUser.getLogin(), user);
+- picks the handler by verb and path;
+- tells a missing resource (404) apart from a wrong verb on an existing one (405), and sends the
+  `Allow` header that RFC 9110 requires with a 405;
+- makes `HEAD` behave like the `GET` it shadows, minus the body;
+- writes the response exactly once, with the right `Content-Length`, inside a `try (exchange)`.
 
-        return id;
-    }
-}
-```
-Finally, let's glue all together in handler:
+### Errors, with an exhaustive switch
 
-```java
-protected void handle(HttpExchange exchange) throws IOException {
-        if (!exchange.getRequestMethod().equals("POST")) {
-            throw new UnsupportedOperationException();
-        }
+`HttpException` is a sealed hierarchy and `ErrorMapper` translates it in a single switch. The
+previous version used a chain of `instanceof` plus manual casts, and a new error type meant
+remembering to add another branch. Now forgetting is a compile error.
 
-        RegistrationRequest registerRequest = readRequest(exchange.getRequestBody(), RegistrationRequest.class);
+Every error response is the same shape, and carries the request id so a user can quote it:
 
-        NewUser user = NewUser.builder()
-            .login(registerRequest.getLogin())
-            .password(PasswordEncoder.encode(registerRequest.getPassword()))
-            .build();
-
-        String userId = userService.create(user);
-
-        exchange.getResponseHeaders().set(Constants.CONTENT_TYPE, Constants.APPLICATION_JSON);
-        exchange.sendResponseHeaders(StatusCode.CREATED.getCode(), 0);
-
-        byte[] response = writeResponse(new RegistrationResponse(userId));
-
-        OutputStream responseBody = exchange.getResponseBody();
-        responseBody.write(response);
-        responseBody.close();
-    }
+```json
+{"code":400,"status":"Bad Request","message":"the request is not valid","requestId":"7d349e78edfa2909",
+ "errors":[{"field":"login","message":"must be between 3 and 64 characters"}]}
 ```
 
-It translates JSON request into `RegistrationRequest` object: 
+A 500 never echoes the internal exception message. Exception text leaks class names, file paths and
+sometimes queries; it belongs in the log, not in the response.
 
-```java
-@Value
-class RegistrationRequest {
+### A test framework, instead of JUnit
 
-    String login;
-    String password;
-}
+`com.cristiannustes.testing` is three files: a `@Test` annotation, an `Assertions` class and a
+`TestRunner` that scans `out/test-classes`, loads the classes and invokes the annotated methods. It
+exits non zero when something fails, which is all a CI job needs.
+
+The integration tests start a real server on an ephemeral port and drive it with
+`java.net.http.HttpClient`, also from the JDK. Nothing is mocked: sockets, router, filters and JSON
+writer all run exactly as in production.
+
+```
+60 tests, 60 passed, 0 failed in 341 ms
 ```
 
-which I later map to domain object `NewUser` to finally save it in database and write response as JSON.
+## Java 25 features, and why each one is here
 
-I need to translate `RegistrationResponse` object back to JSON string.
+**Records** replace Lombok. `@Value`, `@Builder`, `@Getter` and `@AllArgsConstructor` all disappear,
+along with the annotation processor that used to be part of the build.
 
-Marshalling and unmarshalling JSON is done with Jackson object mapper (`com.fasterxml.jackson.databind.ObjectMapper`).
+**Sealed interfaces and pattern matching** give the JSON model and the error hierarchy exhaustive
+switches that the compiler verifies.
 
-And this is how I instantiate the new handler in application main method: 
+**Virtual threads** replace `server.setExecutor(null)`, which served one request at a time. Now
+`Executors.newVirtualThreadPerTaskExecutor()` gives each request its own thread, and blocking I/O no
+longer holds a platform thread hostage. The concurrency test issues sixty simultaneous
+registrations, which the original code would have serialised.
+
+**Scoped values** (JEP 506, final in 25) carry the request id and the authenticated user through the
+call without adding a parameter to every method:
 
 ```java
- public static void main(String[] args) throws IOException {
-        int serverPort = 8000;
-        HttpServer server = HttpServer.create(new InetSocketAddress(serverPort), 0);
-
-        RegistrationHandler registrationHandler = new RegistrationHandler(getUserService(), getObjectMapper(),
-            getErrorHandler());
-        server.createContext("/api/users/register", registrationHandler::handle);
-        
-        // here follows the rest.. 
-
- }
+ScopedValue.where(CURRENT, context).call(() -> { body.run(); return null; });
 ```
 
-You can find the working example in separate git branch, where I also added a global exception handler which is used
-by the API to respond with a standard JSON error message in case, e.g. when HTTP method is not supported or API request is malformed.
+This is where the virtual thread part matters. A `ThreadLocal` on a thread created and destroyed per
+request is at best wasteful and at worst a leak. A scoped value is immutable, visible only inside
+the block that binds it, and needs no cleanup.
 
-```java
-git checkout step-6
-```
+**Flexible constructor bodies** (JEP 513) let `HttpException` validate its arguments *before* calling
+`super(...)`, instead of constructing a half broken object and checking afterwards.
 
-You can run the application and try one of the example requests below: 
+**Stream gatherers** slice the user list into pages with `Gatherers.windowFixed(size)`.
 
-```bash
-curl -X POST localhost:8000/api/users/register -d '{"login": "test" , "password" : "test"}'
-```
+**Compact source files** (JEP 512) are used in [examples/hello.java](examples/hello.java): the whole
+first chapter of the original tutorial, with no class declaration and no static `main`, runnable with
+`java examples/hello.java`.
 
-response: 
-```bash
-{"id":"395eab24-1fdd-41ae-b47e-302591e6127e"}
-```
+Deliberately left out: *structured concurrency*, still a preview feature in Java 25, which would
+force `--enable-preview` on both compilation and execution.
 
-```bash
-curl -v -X POST localhost:8000/api/users/register -d '{"wrong": "request"}'
-```
+## What was wrong with the previous version
 
-response: 
-```bash
-< HTTP/1.1 400 Bad Request
-< Date: Sat, 29 Dec 2018 00:11:21 GMT
-< Transfer-encoding: chunked
-< Content-type: application/json
-< 
-* Connection #0 to host localhost left intact
-{"code":400,"message":"Unrecognized field \"wrong\" (class com.consulner.app.api.user.RegistrationRequest), not marked as ignorable (2 known properties: \"login\", \"password\"])\n at [Source: (sun.net.httpserver.FixedLengthInputStream); line: 1, column: 21] (through reference chain: com.consulner.app.api.user.RegistrationRequest[\"wrong\"])"}
-```
+The rewrite started from a review of the original code. These were real defects, not style
+preferences:
 
-Also, by chance I encountered a project [java-express](https://github.com/Simonwep/java-express) 
-which is a Java counterpart of Node.js [Express](https://expressjs.com/) framework 
-and is using jdk.httpserver as well, so all the concepts covered in this article you can find in real-life application framework :) 
-which is also small enough to digest the codes quickly.
+- **One request at a time.** `server.setExecutor(null)` uses the default executor, which is a single
+  thread.
+- **No graceful shutdown.** Killing the process dropped requests in flight. There is now a shutdown
+  hook that calls `server.stop(grace)`.
+- **Passwords stored in clear text.** `PasswordEncoder.encode` returned its argument, with a
+  `//TODO: implement password encoding` next to it.
+- **Credentials in the source.** `user.equals("admin") && pwd.equals("admin")`, which also threw a
+  `NullPointerException` on a null user and leaked the secret through comparison timing.
+- **Wrong status code.** Registration answered `200 OK`; creating a resource is `201 Created`, with a
+  `Location` header.
+- **A NullPointerException in query parsing.** `splitQuery` split on `=` and took two parts blindly,
+  so `?verbose` produced a null key and blew up inside the grouping collector.
+- **Chunked responses for no reason.** `sendResponseHeaders(status, 0)` starts a chunked response;
+  `-1` means "no body" and a positive number sets `Content-Length`.
+- **Leaked exchanges.** The error path never closed the `HttpExchange`.
+- **`printStackTrace()` as logging**, with no request correlation.
+- **A static, raw `Map` as the datastore**, shared by every instance, which makes isolated tests
+  impossible and needs casts on every read.
+- **No duplicate login check, no validation, no body size limit, no tests.**
+
+## Trade-offs worth naming
+
+**The domain throws HTTP exceptions.** `UserService` raises `ConflictException` and
+`NotFoundException` directly. In a larger system the domain would define its own errors and a
+translation layer would map them to statuses. For an API this size that indirection would cost more
+than it buys, but it is a real coupling and not an accident.
+
+**Storage is a `LinkedHashMap` behind one lock.** Insertion order gives pagination a stable total
+order for free, and the lock keeps the id map and the login index consistent. A database would do
+both better.
+
+**Basic auth caches verified credentials.** Deriving a PBKDF2 hash with 210 000 iterations on every
+request would add roughly 200 ms to each call, so successful verifications are remembered by digest.
+Real systems use a token after the first authentication.
+
+**Passwords travel as `String`.** A `char[]` that can be wiped would be better, but records and
+`String` interoperate badly here. `toString` is overridden on `NewUser`, `UserUpdate` and `User` so
+an accidental log statement cannot print the secret.
+
+## What you should not hand-roll in production
+
+Writing this was worth it. Shipping it would not be. In a real system, use a JSON library, because
+yours will not handle streaming, big decimals or the fifteen encoding edge cases someone will find.
+Use a real framework's router, because content negotiation, CORS, compression and HTTP/2 are more
+than an afternoon of work. Use a real test framework, for parallel execution, parameterised tests
+and IDE integration. Use a build tool, for reproducible dependency resolution.
+
+What does survive contact with production is everything the JDK gave us for free: `jdk.httpserver`,
+virtual threads, scoped values, PBKDF2, and a language whose sealed types and records make whole
+categories of bug impossible to write.
+
+## Credits
+
+Based on the original [pure-java-rest-api](https://github.com/piczmar/pure-java-rest-api) by Marcin
+Piczkowski: a Spring developer wondering what it feels like to build an API without a framework.
+That version still leaned on Jackson, Vavr, Lombok and Maven, and targeted Java 11. This one answers
+the same question with a Java 25 vocabulary and removes the remaining crutches.

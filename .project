@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Eclipse project descriptor, read by the Java language server that VS Code,
+  Cursor and Eclipse all share.
+
+  It is plain XML, not a build tool: it only tells the IDE what ./api already
+  knows, namely where the sources are and which JDK to compile them with.
+  Without it the IDE has to guess, and a stale guess is what produces phantom
+  "cannot be resolved" errors on code that javac compiles cleanly.
+-->
+<projectDescription>
+	<name>pure-java-rest-api</name>
+	<comment>REST API in pure Java 25, no dependencies and no build tool</comment>
+	<projects>
+	</projects>
+	<buildSpec>
+		<buildCommand>
+			<name>org.eclipse.jdt.core.javabuilder</name>
+			<arguments>
+			</arguments>
+		</buildCommand>
+	</buildSpec>
+	<natures>
+		<nature>org.eclipse.jdt.core.javanature</nature>
+	</natures>
+</projectDescription>
